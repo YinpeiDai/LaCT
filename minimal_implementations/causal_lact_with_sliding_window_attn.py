@@ -1,9 +1,13 @@
 import math
+import random
+import time
+import warnings
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.cuda.amp as amp
 from einops import rearrange
+from tqdm import tqdm
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -365,33 +369,34 @@ class CausalLaCTSwiGLUWithSlidingWindowAttn(torch.nn.Module):
             ttt_output, "(b h) l d -> b l (h d)", h=self.num_ttt_heads, b=x.shape[0]
         )
 
-        #### Begin Sliding Window Attention ####
-        # [b, l, d]
-        attn_q, attn_k, attn_v = attn_qkv.chunk(3, dim=-1)
-        attn_q, attn_k = self._rescale_qk(attn_q, attn_k)
+        # #### Begin Sliding Window Attention ####
+        # # [b, l, d]
+        # attn_q, attn_k, attn_v = attn_qkv.chunk(3, dim=-1)
+        # attn_q, attn_k = self._rescale_qk(attn_q, attn_k)
 
-        # -> [b, l, num_attn_heads, attn_head_dim]
-        attn_q = rearrange(attn_q, '... (h d) -> ... h d', d=self.attn_head_dim)
-        attn_k = rearrange(attn_k, '... (h d) -> ... h d', d=self.attn_head_dim)
-        attn_v = rearrange(attn_v, '... (h d) -> ... h d', d=self.attn_head_dim)
+        # # -> [b, l, num_attn_heads, attn_head_dim]
+        # attn_q = rearrange(attn_q, '... (h d) -> ... h d', d=self.attn_head_dim)
+        # attn_k = rearrange(attn_k, '... (h d) -> ... h d', d=self.attn_head_dim)
+        # attn_v = rearrange(attn_v, '... (h d) -> ... h d', d=self.attn_head_dim)
         
-        # here I skip potential qk_norm, and RoPE, please use it if you need.
-        # [b, l, num_attn_heads, attn_head_dim]
-        attn_output = flash_attn_func(
-                attn_q, attn_k, attn_v,
-                causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
-            )
+        # # here I skip potential qk_norm, and RoPE, please use it if you need.
+        # # [b, l, num_attn_heads, attn_head_dim]
+        # attn_output = flash_attn_func(
+        #         attn_q, attn_k, attn_v,
+        #         causal=True,
+        #         window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+        #     )
 
-        attn_output = rearrange(attn_output, '... h d -> ... (h d)')
+        # attn_output = rearrange(attn_output, '... h d -> ... (h d)')
 
-        output = attn_output + ttt_output # [b, l, d]
+        # output = attn_output + ttt_output # [b, l, d]
+        output = ttt_output
         output = self.o_proj(output)
 
         return output
 
 def _test_layer_with_random_input():
-    B, L, D, HeadDim = 1, 4096, 2048, 512
+    B, L, D, HeadDim = 2, 2048*32, 2048, 512
     AttnHeadDim = 128
     LactChunkSize = 2048
     WindowSize = 2048
@@ -401,15 +406,27 @@ def _test_layer_with_random_input():
                                                   lact_chunk_size=LactChunkSize, window_size=WindowSize, 
                                                   inter_multi=1, use_o_norm=True, use_momentum=True, use_muon=True)
     layer = layer.to("cuda")
-    x = torch.randn(B, L, D).to("cuda")
+    
+    for _ in tqdm(range(5)): # warmup
+        x = torch.randn(B, L, D, device="cuda")
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            output = layer(x)
+    del x
 
-    with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-        output = layer(x)
+    for _ in tqdm(range(100)):
+        # L = 2048 * random.randint(10, 30)
+        y = torch.randn(B, L, D, device="cuda")
+        print(y.shape)
+        tstart = time.time()
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            output = layer(y)
+        tend = time.time()
+        print(f"Time taken: {(tend - tstart)} seconds per sample, L={L}")
     print(output.shape)
 
     print(output.shape, output.dtype)
 
-    print("Input norm", x.norm(), "Output norm", output.norm())
+    # print("Input norm", x.norm(), "Output norm", output.norm())
 
 
 if __name__ == "__main__":

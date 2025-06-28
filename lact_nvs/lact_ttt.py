@@ -102,19 +102,19 @@ def fast_weight_swish_glu_weight_norm_mini_batch_apply(
         w0_now, w1_now, w2_now = w0, w1, w2
 
         if update:
-            ki, vi = k[:, start:end, :], v[:, start:end, :]  # bf16
+            ki, vi = k[:, start:end, :], v[:, start:end, :]  # bf16 [b, l, d]
             lr0i = lr0[:, start:end, :]  # [b, l, d/1] fp32
             lr1i = lr1[:, start:end, :]  # [b, l, d/1] fp32
             lr2i = lr2[:, start:end, :]  # [b, l, d/1] fp32
 
             gate_before_act = ki @ w0_now       # b[b, l, dh] = [b, l, d] @ [b, d, dh]
             hidden_before_mul = ki @ w2_now     # b[b, l, dh] = [b, l, d] @ [b, d, dh]
-            hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
+            hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul # [b, l, dh]
 
             dhidden = vi @ w1_now.transpose(-1, -2)  # [b, l, dh] = [b, l, d] @ [b, d, dh]
-            dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
-            dgate = dhidden * hidden_before_mul
-            dgate_before_act = silu_backprop(dgate, gate_before_act)
+            dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False) # [b, l, dh]
+            dgate = dhidden * hidden_before_mul # [b, l, dh]
+            dgate_before_act = silu_backprop(dgate, gate_before_act) # [b, l, dh]
 
             w1_grad = zeropower_via_newtonschulz5(
                 (hidden * lr1i).transpose(-1, -2) @ vi, muon_update_steps
@@ -135,6 +135,7 @@ def fast_weight_swish_glu_weight_norm_mini_batch_apply(
             w2_now = w2_now / (w2_now.norm(dim=1, keepdim=True) + 1e-5) * w2_norm
 
             w0, w1, w2 = w0_now, w1_now, w2_now
+            
 
         if apply:
             # Only calculate the output in the last repeat.
@@ -203,15 +204,16 @@ class FastWeightGluMLPMultihead(nn.Module):
 
     def forward(self, x: torch.Tensor, info=None, *args):
         """
-        x: (b, l, d)
+        x: (b, l, d), l is the total length of the input tokens
         """
-        qkv = F.silu(self.to_qkv(x), inplace=True)  # Silu - Linear
+        qkv = F.silu(self.to_qkv(x), inplace=True)  # Silu - Linear, from [B, L, D] to [B, L, 3D]
         q, k, v = rearrange(
             qkv, "b l (qkv h d) -> qkv (b h) l d",
             qkv=3, h=self.num_heads
-        )
+        ) # each are [Bxheads, L, head_dim]
         q = q / (q.norm(dim=2, keepdim=True) + 1e-5).to(x.dtype)
         k = k / (k.norm(dim=2, keepdim=True) + 1e-5).to(x.dtype)
+
 
         with torch.autocast(device_type="cuda", enabled=False):
             lr = self.lr_fc(x.float())  # [b, l, lr_dim]
@@ -221,6 +223,7 @@ class FastWeightGluMLPMultihead(nn.Module):
             lr, "b l (lrs h d) -> lrs (b h) l d",
             lrs=3, h=self.num_heads
         )
+
 
         if "w0" in info:
             assert "w1" in info and "w2" in info
@@ -243,6 +246,7 @@ class FastWeightGluMLPMultihead(nn.Module):
         )
 
         output = self.c_proj(output)
+
         return output, {"w0": w0, "w1": w1, "w2": w2}
 
     def extra_repr(self) -> str:

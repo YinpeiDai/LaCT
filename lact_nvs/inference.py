@@ -114,11 +114,28 @@ dataloader = DataLoader(
     generator=dataloader_seed_generator,    # This ensures deterministic dataloader
 )
 
+def print_dict_recursively(data_dict):
+    for key, value in data_dict.items():
+        if isinstance(value, dict):
+            print(f"{key}:")
+            print_dict_recursively(value)
+        else:
+            if isinstance(value, torch.Tensor):
+                print(f"{key}: {value.shape}")
+            else:
+                print(f"{key}: {value}")
+
 
 for sample_idx, data_dict in enumerate(dataloader):
     data_dict = {key: value.cuda() for key, value in data_dict.items() if isinstance(value, torch.Tensor)}
-    input_data_dict = {key: value[:, :args.num_input_views] for key, value in data_dict.items()}
+    input_data_dict = {key: value[:, :args.num_input_views] for key, value in data_dict.items()} 
     target_data_dict = {key: value[:, -args.num_target_views:] for key, value in data_dict.items()}
+    
+    # fxfycxcy: torch.Size([B, 20, 4])
+    # c2w: torch.Size([B, 20, 4, 4])
+    # image: torch.Size([B, 20, 3, 256, 256])
+    
+    
 
     with torch.autocast(dtype=torch.bfloat16, device_type="cuda", enabled=True) and torch.no_grad():
         rendering = model(input_data_dict, target_data_dict)
@@ -160,7 +177,7 @@ for sample_idx, data_dict in enumerate(dataloader):
             device=torch.device("cuda"),
         )
         rendering = model(input_data_dict, target_cameras)
-        video_path = os.path.join(output_dir, f"sample_{sample_idx:06d}_turntable.mp4")
+        video_path = os.path.join(output_dir, f"sample_{sample_idx:06d}_turntable.gif")
         frames = (rendering[0].permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
         imageio.mimsave(video_path, frames, fps=30, quality=8)
         print(f"Saved turntable video to {video_path}")

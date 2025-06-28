@@ -1,4 +1,5 @@
 import math
+import time
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -279,9 +280,18 @@ def _test_layer():
     layer = layer.to("cuda")
 
     x = torch.randn(B, L, D).to("cuda")
+        
+    for _ in range(10):
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            output = layer(x)
+    
+    tstart = time.time()
+    for _ in range(100):
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            output = layer(x)
+    tend = time.time()
+    print(f"Time taken: {(tend - tstart) / 100} seconds per sample")
 
-    with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-        output = layer(x)
     print(output.shape, output.dtype)
     print("Input norm", x.norm(), "Output norm", output.norm())
 

@@ -113,6 +113,8 @@ class Block(nn.Module):
         self.module_list = nn.ModuleList(module_list)
 
     def forward(self, x, info):
+        # vl: total image tokens, num_img x 1024
+        # l: image tokens, 1024
         results = {}
         for module, length_dim in zip(self.module_list, self.length_dim_list):
             residual = x
@@ -210,11 +212,11 @@ class LaCTLVSM(nn.Module):
                 fxfycxcy = data_dict["fxfycxcy"]
                 c2w = data_dict["c2w"]
 
-                data_dict["ray_o"], data_dict["ray_d"] = compute_rays(fxfycxcy, c2w, h, w)
-                data_dict["o_cross_d"] = torch.cross(data_dict["ray_o"], data_dict["ray_d"], dim=2)
+                data_dict["ray_o"], data_dict["ray_d"] = compute_rays(fxfycxcy, c2w, h, w) # [B, N, 3, H, W]
+                data_dict["o_cross_d"] = torch.cross(data_dict["ray_o"], data_dict["ray_d"], dim=2) # [B, N, 3, H, W]
                 data_dict["pose_only"] = torch.concat(
                     [data_dict[key] for key in self.pose_keys], dim=2
-                )
+                ) # [B, N, 9, H, W]
                 
                 if "image" in data_dict:
                     data_dict["normalized_image"] = data_dict["image"] * 2.0 - 1.0
@@ -222,19 +224,23 @@ class LaCTLVSM(nn.Module):
                     # Compile the information for posed-image input, and pose-only input.
                     data_dict["posed_image"] = torch.concat(
                         [data_dict[key] for key in self.posed_image_keys], dim=2
-                    )
+                    ) # [B, N, 12, H, W]
+                
             
             transformer_input = input_data_dict["image"].new_zeros(
                 batch_size, num_input_views + num_target_views, self.input_dim, h, w
-            )  
+            )
             transformer_input[:, :num_input_views, :, :, :] = input_data_dict["posed_image"]
+            
             pose_only_dim = target_data_dict["pose_only"].size(2)
-            transformer_input[:, num_input_views:, :pose_only_dim, :, :] = target_data_dict["pose_only"]
+            transformer_input[:, num_input_views:, :pose_only_dim, :, :] = target_data_dict["pose_only"] # [B, N, 12, H, W]
 
+        
         # Running the model
-        num_img_tokens = h * w // (self.patch_size**2)
-        num_input_tokens = num_input_views * num_img_tokens
-        num_target_tokens = num_target_views * num_img_tokens
+        num_img_tokens = h * w // (self.patch_size**2) # 32x32 = 1024
+        num_input_tokens = num_input_views * num_img_tokens # 20 * 1024 = 20480
+        num_target_tokens = num_target_views * num_img_tokens # 12 * 1024 = 12288
+
         ttt_op_order = [
             TTTOperator(start=0, end=num_input_tokens, update=True, apply=False),
             TTTOperator(start=0, end=num_input_tokens + num_target_tokens, update=False, apply=True),
@@ -249,14 +255,14 @@ class LaCTLVSM(nn.Module):
             "b v c (hh ph) (ww pw) -> b (v hh ww) (ph pw c)",
             ph=self.patch_size,
             pw=self.patch_size,
-        )
+        ) # [B, 20480 + 12288, 12x8x8] = [B, 32768, 768]
         x = self.input_linear(x)
         x = self.input_layernorm(x)
         for block in self.blocks:
             x, _ = block(x, info)
         
-        target_x = x[:, -num_target_tokens:]
-        target_x = self.image_token_decoder(target_x)
+        target_x = x[:, -num_target_tokens:] # [B, 12288, 768]
+        target_x = self.image_token_decoder(target_x) # [B, 12288, 3x8x8] = [B, 12288, 192]
         target_x = rearrange(
             target_x,
             "b (v hh ww) (ph pw c) -> b v c (hh ph) (ww pw)",
@@ -266,6 +272,6 @@ class LaCTLVSM(nn.Module):
             ph=self.patch_size,
             pw=self.patch_size,
             c=3,
-        )
+        ) # [B, 12, 3, 256, 256]
         return target_x
     
