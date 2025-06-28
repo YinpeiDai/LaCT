@@ -1,0 +1,254 @@
+model:
+  class_name: models.video_latent_flow_matching_ar.VideoLatentFlowMatching
+  generator_ckpt: False # /mnt/localssd/minVid/ckpt/wan/Wan2.1-T2V-1.3B/
+  drop_text_prob: 0.1
+  ar_window_size: 3 # three latent frame each
+  adjust_timestep_shift: true
+  num_repeat: 1 # 2
+  frame_independent_noise: true
+  logit_normal_weighting: true
+
+  diffusion_config:
+    class_name: minVid.models.wan.wan_warpper_versatile.WanDiffusionWrapper
+    # no generator ckpt, means no loading. will load pretrained_dcp
+    # generator_ckpt: /sensei-fs/users/tianyuanz/projects/VideoTTT/experiments_v1/v2_eff_mf1_firststaget_ar_5k_tttonorm_only_tttmix_sliding_window_4680_hybrid_bs64_lr2e-5_20x_wd0.01_tsada_block_swiglu_head768_inter_2x_weight_norm_ttscale_learn_qkl2norm_noattn_ema0.995_logitn/seed_1/checkpoint_model_003999/model.pt
+    generator_ckpt: /mnt/localssd/minVid/ckpt/wan/Wan2.1-T2V-1.3B/diffusion_pytorch_model.safetensors
+    shift: 3.0
+    extra_one_step: true
+    model_config:
+      class_name: minVid.models.wan.wan_base.modules.wan_model_warpper.WanModel
+      model_type: t2v
+      patch_size: 
+        - 1
+        - 2
+        - 2
+      in_dim: 16
+      dim: 1536
+      ffn_dim: 8960
+      freq_dim: 256
+      num_heads: 12
+      num_layers: 30
+      out_dim: 16
+      eps: 1e-06
+      text_len: 512
+      attn_every_n_layers: 100 # full global attention
+      efficient_attn_config:
+        - class_name: minVid.models.blocks.ar_lact_swa_repeat_sp.ARFastWeightSwiGLU 
+          dim: 1536
+          num_heads: 12
+          qk_norm: true
+          o_norm: true
+          local_window_size: 4680 # size for window attention 
+          update_every: 9360 # 14040 if repeat=2
+          qk_l2_norm: true 
+          qkv_silu: false
+          w_init: clean
+          inter_multi: 2
+          lr_dim: 1
+          fw_head_dim: 768 #  768
+          use_moun: false # false
+          num_moun_iters: 5
+          weight_norm: true
+          ttt_scale: 1.0
+          learnable_ttt_scale: true # false 
+          use_momentum: false
+          ar_window_f: 3 # number of latent frames. used for correct rope implementation. 
+          batch_size: 1 # make sure to fill in this! used for reshaping the input tokens! 
+          n_latent_f: 42 # number of latent frames. used for correct rope implementation. 
+  text_encoder_config:
+    class_name: minVid.models.wan.wan_text_vae_warpper.WanTextEncoder
+    model_path: /mnt/localssd/minVid/ckpt/wan/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth
+  vae_config:
+    class_name: minVid.models.wan.wan_text_vae_warpper.WanVAEWrapper
+    model_path: /mnt/localssd/minVid/ckpt/wan/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth
+  timestep_shift: 3.0
+  timestep_sample_method: uniform
+  denoising_loss_type: flow
+  num_train_timestep: 1000 # not used for continious flow matching
+  mixed_precision: true
+  sample_timestep_shift: 3.0
+
+# training related
+exp_name: debug
+output_path: ../experiments_v1
+
+seed: 1000
+deterministic: false
+
+# distributed training related
+
+mixed_precision: true
+sharding_strategy: hybrid_full
+text_encoder_fsdp_wrap_strategy: size
+text_encoder_fsdp_transformer_module: "transformer"
+
+ 
+lr: 0.000005 # 5e-6
+beta1: 0.9
+beta2: 0.95
+weight_decay: 0.0 #  0.0 # 0.01
+lr_scheduler_type: cosine
+max_fwdbwd_passes: 5000
+warmup: 1000
+grad_accum_steps: 2 # not accum
+grad_clip_norm: 1.0
+
+wandb_host: "https://adobesensei.wandb.io/" # replace with your wandb host
+api_key_path: "./api_keys.yaml" # please put your api key here. 
+wandb_entity: research-3gi  # replace with your wandb entity
+wandb_project: vid_compress # replace with your wandb project
+wandb_log_every: 10
+save_every: 1000
+
+keep_last_iter: 3000
+
+batch_size_per_gpu: 1
+
+train:
+  sp_size: 2
+  attn_only: false # # only train the attention blocks. setting to false will train the whole model. 
+  first_stage: false
+  train_disable_auto_gc: true
+  train_manual_gc_interval: 200
+  use_ema: true
+  ema_weight: 0.995
+  lr_multiplier: 10.0
+  continue_training: true
+  fsdp_strategy: full # hybrid_full
+  fsdp_wrap_policy: module
+  fsdp_modules: 
+    - minVid.models.wan.wan_base.modules.wan_model_warpper.WanAttentionBlock
+  # if you have a pretrained dcp, you can load it here:
+  # pretrained_dcp_path: /sensei-fs/users/tianyuanz/projects/VideoTTT/experiments_v1/10sec_cont2k_v2_eff_fullft_rep1_mf0.3_2_ar_5k_tttonorm_only_tttmix_sliding_window_4680_hybrid_bs64_lr5e-6_10x_wd0_ema0.995_ts3_swiglu_head768_inter_2x_weight_norm_ttscale_learn_qkl2norm_noattn_logitn/seed_2200/checkpoint_model_002249
+
+# [480, 832].  5s, 16fps => 81 frame
+# [81, 3, 480, 832]
+dataset_train:
+  target: gpu_pin_hybrid_loader
+  params:
+  # 720p video 68f 24fps
+    - target: genie.data.GenieCore
+      ratio: 3
+      params:
+        match_piat_caption: true
+        batch_size: 1
+        num_frames: 165 # 68
+        sample_fps: 16 # 24
+        num_threads: 4
+        num_workers: 8
+        data_source: >
+          SELECT t1.cid,
+                t2.id32,
+                t2.can_be_trained,
+                t2.rendition,
+                t2.fps_numerator,
+                t2.fps_denominator,
+                t2.num_frames,
+                t2.video,
+                t2.translated_caption,
+                t2.translated_caption_word_count,
+                t2.aesthetic,
+                t2.sv,
+                t2.mean_flow_mag,
+                t2.a1_frame_based,
+                t2.internvl2_generated_caption as internvl,
+                t2.source_video_height,
+                t2.source_video_width,
+                ',' || t2.keywords || ',' as _keywords
+          FROM '/sensei-fs/tenants/Sensei-AdobeResearchTeam/kineto/share-zhewang/prod_6dot2m_withinternvl.parquet' t1
+          INNER JOIN 'genie.stock1080:latest' t2
+          ON t1.cid = t2.cid
+          WHERE    t2.can_be_trained IS true
+          AND      t2.num_frames IS NOT NULL
+          AND      t2.fps_numerator IS NOT NULL
+          AND      t2.fps_denominator IS NOT NULL
+          AND      t2.a1_frame_based IS NOT NULL
+          AND      (t2.translated_caption IS NOT NULL OR internvl IS NOT NULL)
+          AND      t2.aesthetic IS NOT NULL
+          AND      t2.aesthetic > 5
+          AND      t2.mean_flow_mag IS NOT NULL
+          AND      t2.mean_flow_mag BETWEEN 0.3 AND 2
+          AND      t2.sv IS NOT NULL
+          AND      t2.video IS NOT NULL
+          AND      t2.source_video_height < t2.source_video_width AND NOT COALESCE(t2.is_gentech, false)
+          AND     ( _keywords is NULL OR (_keywords not like '%,underwear,%' AND _keywords not like '%,lingerie,%' AND _keywords not like '%,breast,%' AND _keywords not like '%,erotic,%' AND _keywords not like '%,nude,%' AND _keywords not like '%,seduction,%' AND _keywords not like '%,provocative,%' AND _keywords not like '%,topless,%' AND _keywords not like '%,ass,%' AND _keywords not like '%,fetish,%' AND _keywords not like '%,murderer,%' AND _keywords not like '%,seduce,%' AND _keywords not like '%,bondage,%' AND _keywords not like '%,erotica,%' AND _keywords not like '%,bdsm,%' AND _keywords not like '%,stripper,%' AND _keywords not like '%,pantyhose,%' AND _keywords not like '%,striptease,%' AND _keywords not like '%,undressed,%' AND _keywords not like '%,penis,%' AND _keywords not like '%,booty,%' AND _keywords not like '%,abused,%' AND _keywords not like '%,orgasm,%' AND _keywords not like '%,hostage,%' AND _keywords not like '%,vagina,%' AND _keywords not like '%,busty,%' AND _keywords not like '%,excrement,%' AND _keywords not like '%,masturbation,%' AND _keywords not like '%,foreplay,%' AND _keywords not like '%,feces,%' AND _keywords not like '%,anal,%' AND _keywords not like '%,noose,%' AND _keywords not like '%,dildo,%' AND _keywords not like '%,kinky,%' AND _keywords not like '%,horny,%' AND _keywords not like '%,homicide,%' AND _keywords not like '%,underclothing,%' AND _keywords not like '%,dominatrix,%' AND _keywords not like '%,submissive,%' AND _keywords not like '%,prostitution,%' AND _keywords not like '%,prostitute,%' AND _keywords not like '%,pornography,%' AND _keywords not like '%,sadomasochism,%' AND _keywords not like '%,groin,%' AND _keywords not like '%,nudist,%' AND _keywords not like '%,gallows,%' AND _keywords not like '%,boob,%' AND _keywords not like '%,piss,%' AND _keywords not like '%,masochism,%' AND _keywords not like '%,crotch,%' AND _keywords not like '%,kink,%' AND _keywords not like '%,porno,%' AND _keywords not like '%,bellydancer,%' AND _keywords not like '%,morgue,%' AND _keywords not like '%,phallic,%' AND _keywords not like '%,masturbate,%' AND _keywords not like '%,fecal,%' AND _keywords not like '%,pubic,%' AND _keywords not like '%,hitler,%' AND _keywords not like '%,brothel,%' AND _keywords not like '%,masturbating,%' AND _keywords not like '%,extremism,%' AND _keywords not like '%,nudism,%' AND _keywords not like '%,spank,%' AND _keywords not like '%,masochist,%' AND _keywords not like '%,gunpoint,%' AND _keywords not like '%,sextoy,%' AND _keywords not like '%,slut,%'))
+          ORDER BY hash(t1.cid)
+        stages:
+          - genie.core_stages.uniform_sampler:
+              in:
+                num_requested_frames: $config.num_frames
+                sample_fps: $config.sample_fps
+                video_s3_url: $record.video
+              out:
+                - frame_indices
+          # Frame-indexed thingies.
+          - [ '@let', [ 'adobe_one_embeddings', '$record.a1_frame_based[random.choice(frame_indices)]']]
+          - [ '@let', [ 'lp_vae_pixel_space_shapes', '{"256p": (176, 320), "512p": (352, 640), "1080p": (704, 1280)}'] ]
+          - [ '@let', [ 'lp_vae_pixel_space_shape', 'lp_vae_pixel_space_shapes[$record.rendition]' ] ]
+          - [ '@let', [ pixel_space_crop_size, '(480, 832)' ] ]
+          # But, you can change the crop size to anything you like, e.g.:
+          # - ['@let', [pixel_space_crop_size, '(1024, 640)']] # Frame crop shape can be changed to anything you like if you just want constants.
+          # fetch video frames
+          - in:
+              indices: frame_indices
+              video_s3_url: $record.video
+              # tianyuan added below three rows. 
+              # center_crop_size: pixel_space_crop_size
+              # output_pattern: "'c t h w'"
+              # interpolation: "'bicubic'"
+            operator: genie.core_stages.fetch_video_clip
+            out:
+              - frames
+          # check if frames have alpha channel
+          - in:
+              frames: frames
+            operator: genie.core_stages.has_maskframes
+            out:
+              - has_maskframes
+          # skip if frames have alpha channel
+          - in:
+              cond: 'has_maskframes is True'
+            operator: genie.core_stages.skip_if
+          - in:
+              frames: frames
+              output_size: pixel_space_crop_size
+              no_upsampling: true
+            operator: genie.core_stages.center_resized_crop
+            out:
+              - frames
+          - in:
+              pattern: '"t c h w -> c t h w"'
+              tensors: '[frames]'
+            operator: genie.core_stages.rearrange
+            out:
+              - frames
+          # captions
+          - in:
+              llm_caption: $record.internvl["generated_caption"]
+              original_caption: $record.translated_caption
+              original_caption_length: $record.translated_caption_word_count
+              min_original_caption_length: 8
+              weights: [40, 60]
+            operator: genie.core_stages.random_choose_llm_caption
+            out:
+              - chosen_caption
+          - in:
+              - (adobe_one_embeddings, (1024,))
+              - '(frames, (3, len(frame_indices), *pixel_space_crop_size))'
+            operator: genie.core_stages.check_shape
+          - in:
+              caption: str(chosen_caption)
+              # a1ImageEmbedding: adobe_one_embeddings
+              # cid: str($record.cid)
+              frames: frames # * 2.0 - 1.0
+              # aesthetic: $record.aesthetic
+              # List of frame indices to be used. Heterogeneous, hence collate_as_list.
+              # frame_indices: collate_as_list(frame_indices)
+              # Timestamp (s) of the first frame, f64
+              # time_start: frame_indices[0] *  $record.fps_denominator / $record.fps_numerator
+              # Time step (s) between frames, 0 if only one frame, f64
+              #time_step: ($record.fps_denominator / $record.fps_numerator) if len(frame_indices) > 1 else 0.0
+              video_total_frames: $record.num_frames
+              sample_fps: $config.sample_fps
+              # dual_vae: remote_call("vae", frames * 2.0 - 1.0, "mjpeg_rust")
+            operator: sink
